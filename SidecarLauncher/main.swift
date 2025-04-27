@@ -11,6 +11,7 @@ enum Command : String {
     case Devices    = "devices"
     case Connect    = "connect"
     case Disconnect = "disconnect"
+    case Toggle     = "toggle"
 }
 enum Option : String {
     case WiredConnection = "-wired"
@@ -26,7 +27,7 @@ func printHelp() {
         
             \(Command.Connect.rawValue) <device_name> [\(Option.WiredConnection.rawValue)]
                        Connect to device with the specified name. Use quotes aroung device_name.
-                       Example: \(sidecarLauncher) \(Command.Connect.rawValue) "Joe‘s iPad" \(Option.WiredConnection.rawValue)
+                       Example: \(sidecarLauncher) \(Command.Connect.rawValue) "Joe's iPad" \(Option.WiredConnection.rawValue)
                        
                        WARNING:
                        \(Option.WiredConnection.rawValue) is an experimental option that tries to force a wired connection when initializing a Sidecar
@@ -39,7 +40,12 @@ func printHelp() {
         
             \(Command.Disconnect.rawValue) <device_name>
                        Disconnect from device with the specified name. Use quotes.
-                       Example: \(sidecarLauncher) \(Command.Disconnect.rawValue) "Joe‘s iPad"
+                       Example: \(sidecarLauncher) \(Command.Disconnect.rawValue) "Joe's iPad"
+
+            \(Command.Toggle.rawValue)
+                       If connected, disconnects from the current device.
+                       If not connected, lists devices and connects to the first one.
+                       Example: \(sidecarLauncher) \(Command.Toggle.rawValue)
         
         Exit Codes:
             0    Command completed successfully
@@ -117,7 +123,7 @@ if (cmd == .Connect || cmd == .Disconnect) {
     guard let targetDevice = targetDevice else {
         print("""
               \(targetDeviceName) is not in the list of available devices.
-              Verify device name. For example "Joe's iPad" is different from "Joe‘s iPad" (notice the apostrophe)
+              Verify device name. For example "Joe's iPad" is different from "Joe's iPad" (notice the apostrophe)
               For accuracy, list the available devices and copy paste the device name.
               """)
         exit(3)
@@ -130,10 +136,13 @@ if (cmd == .Connect || cmd == .Disconnect) {
         }
         
         if let e = e {
-            print(e)
+            print("Error during \(cmd.rawValue): \(e.localizedDescription)")
+            if let underlyingError = e.userInfo[NSUnderlyingErrorKey] as? NSError {
+                 print("Underlying Error: \(underlyingError.localizedDescription)")
+            }
             exit(4)
         } else {
-            print(cmd == .Connect ? "connected" : "disconnected")
+            print(cmd == .Connect ? "Successfully connected to \(targetDeviceName)" : "Successfully disconnected from \(targetDeviceName)")
         }
     }
     dispatchGroup.enter()
@@ -145,23 +154,109 @@ if (cmd == .Connect || cmd == .Disconnect) {
             
             let deviceConfig = cSidecarDisplayConfig.init()
             let setTransportSelector = Selector(("setTransport:"))
+            guard deviceConfig.responds(to: setTransportSelector) else {
+                 fatalError("SidecarDisplayConfig does not respond to setTransport:")
+            }
             let setTransportIMP = deviceConfig.method(for: setTransportSelector)
             let setTransport = unsafeBitCast(setTransportIMP, to:(@convention(c)(Any?, Selector, Int64)->Void).self)
             setTransport(deviceConfig, setTransportSelector, 2)
             
             let connectSelector = Selector(("connectToDevice:withConfig:completion:"))
+            guard manager.responds(to: connectSelector) else {
+                fatalError("SidecarDisplayManager does not respond to connectToDevice:withConfig:completion:")
+            }
             let connectIMP = manager.method(for: connectSelector)
             let connect = unsafeBitCast(connectIMP,to:(@convention(c)(Any?,Selector,Any?,Any?,Any?)->Void).self)
             connect(manager,connectSelector, targetDevice, deviceConfig, closure)
         } else {
-            _ = manager.perform(Selector(("connectToDevice:completion:")), with: targetDevice, with: closure)
+             let connectSelector = Selector(("connectToDevice:completion:"))
+             guard manager.responds(to: connectSelector) else {
+                 fatalError("SidecarDisplayManager does not respond to connectToDevice:completion:")
+             }
+            _ = manager.perform(connectSelector, with: targetDevice, with: closure)
         }
     } else {
         assert(cmd == .Disconnect)
-        _ = manager.perform(Selector(("disconnectFromDevice:completion:")), with: targetDevice, with: closure)
+        let disconnectSelector = Selector(("disconnectFromDevice:completion:"))
+        guard manager.responds(to: disconnectSelector) else {
+            fatalError("SidecarDisplayManager does not respond to disconnectFromDevice:completion:")
+        }
+        _ = manager.perform(disconnectSelector, with: targetDevice, with: closure)
     }
     dispatchGroup.wait()
     
+} else if cmd == .Toggle {
+    if devices.isEmpty {
+        print("No sidecar capable devices detected to connect to.")
+        exit(2)
+    }
+
+    let firstDevice = devices[0]
+    let firstDeviceName = firstDevice.perform(Selector(("name")))?.takeUnretainedValue() as! String
+    print("Found device: \(firstDeviceName)")
+
+    print("Attempting to disconnect (in case already connected)...")
+    let disconnectDispatchGroup = DispatchGroup()
+    var disconnectError: NSError? = nil
+    let disconnectClosure: @convention(block) (_ e: NSError?) -> Void = { e in
+        disconnectError = e
+        if e == nil {
+             print("Successfully disconnected from \(firstDeviceName)")
+        } else {
+             print("Disconnection attempt finished (may not have been connected).")
+        }
+        disconnectDispatchGroup.leave()
+    }
+
+    disconnectDispatchGroup.enter()
+    let disconnectSelector = Selector(("disconnectFromDevice:completion:"))
+     if manager.responds(to: disconnectSelector) {
+        _ = manager.perform(disconnectSelector, with: firstDevice, with: disconnectClosure)
+     } else {
+         print("Warning: Cannot find disconnect method, proceeding to connect.")
+         disconnectDispatchGroup.leave()
+     }
+    disconnectDispatchGroup.wait()
+
+    if disconnectError == nil {
+        print("Toggle: Successfully disconnected.")
+        exit(0)
+    } else {
+        print("Toggle: Not connected or disconnect failed. Attempting connection...")
+
+        print("Attempting to connect to \(firstDeviceName)...")
+        let connectDispatchGroup = DispatchGroup()
+        var connectError: NSError? = nil
+        let connectClosure: @convention(block) (_ e: NSError?) -> Void = { e in
+            connectError = e
+            if e == nil {
+                 print("Successfully connected to \(firstDeviceName)")
+            } else {
+                 print("Error during connection: \(e!.localizedDescription)")
+                 if let underlyingError = e!.userInfo[NSUnderlyingErrorKey] as? NSError {
+                      print("Underlying Error: \(underlyingError.localizedDescription)")
+                 }
+            }
+            connectDispatchGroup.leave()
+        }
+
+        connectDispatchGroup.enter()
+        let connectSelector = Selector(("connectToDevice:completion:"))
+        if manager.responds(to: connectSelector) {
+             _ = manager.perform(connectSelector, with: firstDevice, with: connectClosure)
+        } else {
+             print("Error: Cannot find connect method.")
+             connectError = NSError(domain: "SidecarLauncher", code: 4, userInfo: [NSLocalizedDescriptionKey: "Connect method not found on SidecarDisplayManager"])
+             connectDispatchGroup.leave()
+        }
+        connectDispatchGroup.wait()
+
+        if connectError != nil {
+            exit(4)
+        } else {
+            exit(0)
+        }
+    }
 } else {
     let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
     for deviceName in deviceNames {
