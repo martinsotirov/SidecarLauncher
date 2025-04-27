@@ -113,9 +113,11 @@ func printHelp() {
                        List names of reachable sidecar capable devices.
                        Example: \(sidecarLauncher) \(Command.Devices.rawValue)
         
-            \(Command.Connect.rawValue) <device_name> [\(Option.WiredConnection.rawValue)]
-                       Connect to device with the specified name. Use quotes aroung device_name.
+            \(Command.Connect.rawValue) [<device_name>] [\(Option.WiredConnection.rawValue)]
+                       Connect to device with the specified name (or first available if none specified).
+                       Use quotes around device_name.
                        Example: \(sidecarLauncher) \(Command.Connect.rawValue) "Joe's iPad" \(Option.WiredConnection.rawValue)
+                       Example (fallback): \(sidecarLauncher) \(Command.Connect.rawValue)
                        
                        WARNING:
                        \(Option.WiredConnection.rawValue) is an experimental option that tries to force a wired connection when initializing a Sidecar
@@ -126,9 +128,10 @@ func printHelp() {
                        Nor will it automatically reconnect when the cable is reconnected. The session needs to be terminated
                        and a new connection needs to be established.
         
-            \(Command.Disconnect.rawValue) <device_name>
-                       Disconnect from device with the specified name. Use quotes.
+            \(Command.Disconnect.rawValue) [<device_name>]
+                       Disconnect from the specified device (or first available if none specified). Use quotes.
                        Example: \(sidecarLauncher) \(Command.Disconnect.rawValue) "Joe's iPad"
+                       Example (fallback): \(sidecarLauncher) \(Command.Disconnect.rawValue)
 
             \(Command.Toggle.rawValue) [<device_name>]
                        If connected to the specified device (or the first device if none specified), disconnects.
@@ -177,11 +180,6 @@ if (cmd == .Connect || cmd == .Disconnect || cmd == .Toggle) {
         }
     } else {
          targetDeviceName = ""
-         if (cmd == .Connect || cmd == .Disconnect) {
-              print("A device name must be specified for the '\(cmd.rawValue)' command.")
-              printHelp()
-              exit(1)
-         }
     }
 } else {
     targetDeviceName = ""
@@ -216,15 +214,34 @@ if cmd == .Devices {
     }
     exit(0)
 } else if cmd == .Connect {
-    guard let targetDevice = findDevice(named: targetDeviceName, in: devices) else {
-        print("'\(targetDeviceName)' not found among reachable devices.")
-        let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
-        print("Available devices: \(deviceNames.joined(separator: ", "))")
-        exit(3)
+    var deviceToConnect: NSObject?
+    var actualDeviceNameToConnect: String = ""
+
+    if !targetDeviceName.isEmpty {
+        print("Connect: Using specified device '\(targetDeviceName)'")
+        deviceToConnect = findDevice(named: targetDeviceName, in: devices)
+        guard deviceToConnect != nil else {
+             print("'\(targetDeviceName)' not found among reachable devices.")
+             let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
+             print("Available devices: \(deviceNames.joined(separator: ", "))")
+             exit(3)
+        }
+        actualDeviceNameToConnect = targetDeviceName // Already lowercased during arg parsing
+    } else {
+        print("Connect: No device specified, using first available device.")
+        // devices list is guaranteed not empty here due to earlier check
+        deviceToConnect = devices[0]
+        actualDeviceNameToConnect = deviceToConnect!.perform(Selector(("name")))?.takeUnretainedValue() as? String ?? "Unknown Device"
+        print("Found device: \(actualDeviceNameToConnect)")
+    }
+
+    guard let finalDeviceToConnect = deviceToConnect else {
+         print("Error: Could not determine device to connect.")
+         exit(1)
     }
     
-    print("Attempting to connect to '\(targetDeviceName)'...")
-    performConnect(device: targetDevice, deviceName: targetDeviceName, manager: manager, useWired: (option == .WiredConnection)) { error in
+    print("Attempting to connect to '\(actualDeviceNameToConnect)'...")
+    performConnect(device: finalDeviceToConnect, deviceName: actualDeviceNameToConnect, manager: manager, useWired: (option == .WiredConnection)) { error in
         if let error = error {
             print("Error during connection: \(error.localizedDescription)")
             if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError {
@@ -232,21 +249,40 @@ if cmd == .Devices {
             }
             exit(4)
         } else {
-            print("Successfully connected to '\(targetDeviceName)'")
+            print("Successfully connected to '\(actualDeviceNameToConnect)'")
             exit(0)
         }
     }
     exit(4)
 } else if cmd == .Disconnect {
-    guard let targetDevice = findDevice(named: targetDeviceName, in: devices) else {
-        print("'\(targetDeviceName)' not found among reachable devices.")
-        let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
-        print("Available devices: \(deviceNames.joined(separator: ", "))")
-        exit(3)
+    var deviceToDisconnect: NSObject?
+    var actualDeviceNameToDisconnect: String = ""
+
+    if !targetDeviceName.isEmpty {
+        print("Disconnect: Using specified device '\(targetDeviceName)'")
+        deviceToDisconnect = findDevice(named: targetDeviceName, in: devices)
+        guard deviceToDisconnect != nil else {
+             print("'\(targetDeviceName)' not found among reachable devices.")
+             let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
+             print("Available devices: \(deviceNames.joined(separator: ", "))")
+             exit(3)
+        }
+        actualDeviceNameToDisconnect = targetDeviceName // Already lowercased
+    } else {
+        print("Disconnect: No device specified, using first available device.")
+        // devices list is guaranteed not empty here
+        deviceToDisconnect = devices[0]
+        actualDeviceNameToDisconnect = deviceToDisconnect!.perform(Selector(("name")))?.takeUnretainedValue() as? String ?? "Unknown Device"
+        print("Found device: \(actualDeviceNameToDisconnect)")
     }
     
-    print("Attempting to disconnect from '\(targetDeviceName)'...")
-    performDisconnect(device: targetDevice, deviceName: targetDeviceName, manager: manager) { error in
+    guard let finalDeviceToDisconnect = deviceToDisconnect else {
+         print("Error: Could not determine device to disconnect.")
+         exit(1)
+    }
+    
+    print("Attempting to disconnect from '\(actualDeviceNameToDisconnect)'...")
+    performDisconnect(device: finalDeviceToDisconnect, deviceName: actualDeviceNameToDisconnect, manager: manager) { error in
         if let error = error {
             print("Error during disconnection: \(error.localizedDescription)")
              if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError {
@@ -254,7 +290,7 @@ if cmd == .Devices {
             }
             exit(4)
         } else {
-            print("Successfully disconnected from '\(targetDeviceName)'")
+            print("Successfully disconnected from '\(actualDeviceNameToDisconnect)'")
             exit(0)
         }
     }
